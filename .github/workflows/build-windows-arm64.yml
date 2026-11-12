@@ -1,0 +1,108 @@
+name: Windows ARM64 build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-arm64-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build native Windows ARM64 NSIS
+    runs-on: windows-11-vs2026-arm
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUST_BACKTRACE: "1"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install pnpm
+        shell: pwsh
+        run: npm install --global pnpm@10.23.0
+
+      - name: Set up Rust ARM64 target
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --target aarch64-pc-windows-msvc
+          rustup default stable
+          rustup target add aarch64-pc-windows-msvc
+          rustc -vV
+          if ((rustc -vV | Select-String '^host:').ToString() -notmatch 'aarch64-pc-windows-msvc') {
+            throw "Runner Rust host is not native Windows ARM64."
+          }
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Windows ARM64 NSIS installer
+        run: pnpm tauri build --target aarch64-pc-windows-msvc --bundles nsis
+
+      - name: Verify application PE architecture and prepare checksums
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $targetDir = Join-Path $PWD 'src-tauri/target/aarch64-pc-windows-msvc/release'
+          $app = Join-Path $targetDir 'huangguo-client.exe'
+          if (-not (Test-Path $app)) {
+            $candidates = @(Get-ChildItem -Path $targetDir -Filter '*.exe' -File)
+            if ($candidates.Count -ne 1) {
+              throw "Could not uniquely identify the application executable in $targetDir"
+            }
+            $app = $candidates[0].FullName
+          }
+
+          $stream = [System.IO.File]::OpenRead($app)
+          try {
+            $reader = [System.IO.BinaryReader]::new($stream)
+            $stream.Position = 0x3C
+            $peOffset = $reader.ReadInt32()
+            $stream.Position = $peOffset
+            if ($reader.ReadUInt32() -ne 0x00004550) {
+              throw 'Invalid PE signature.'
+            }
+            $machine = $reader.ReadUInt16()
+          } finally {
+            $stream.Dispose()
+          }
+          if ($machine -ne 0xAA64) {
+            throw ('Application is not ARM64. PE machine: 0x{0:X4}' -f $machine)
+          }
+          Write-Host ('Verified native ARM64 application: ' + $app)
+
+          $bundleDir = Join-Path $targetDir 'bundle/nsis'
+          $installer = @(Get-ChildItem -Path $bundleDir -Filter '*.exe' -File)
+          if ($installer.Count -lt 1) {
+            throw "No NSIS installer found in $bundleDir"
+          }
+
+          $artifactDir = Join-Path $PWD 'artifacts'
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+          Copy-Item -LiteralPath $app -Destination $artifactDir
+          Copy-Item -Path (Join-Path $bundleDir '*.exe') -Destination $artifactDir
+          $files = Get-ChildItem -Path $artifactDir -Filter '*.exe' -File
+          $hashLines = foreach ($file in $files) {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
+            "$hash  $($file.Name)"
+          }
+          $hashLines | Set-Content -Encoding ascii (Join-Path $artifactDir 'SHA256SUMS.txt')
+
+      - name: Upload ARM64 build artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: HGhub-Windows-ARM64
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 14
