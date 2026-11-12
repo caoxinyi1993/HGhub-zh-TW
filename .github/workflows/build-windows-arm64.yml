@@ -36,9 +36,8 @@ jobs:
       - name: Set up Rust ARM64 target
         shell: pwsh
         run: |
-          rustup toolchain install stable --profile minimal --target aarch64-pc-windows-msvc
-          rustup default stable
-          rustup target add aarch64-pc-windows-msvc
+          rustup toolchain install stable-aarch64-pc-windows-msvc --profile minimal --target aarch64-pc-windows-msvc
+          rustup default stable-aarch64-pc-windows-msvc
           rustc -vV
           if ((rustc -vV | Select-String '^host:').ToString() -notmatch 'aarch64-pc-windows-msvc') {
             throw "Runner Rust host is not native Windows ARM64."
